@@ -1,5 +1,4 @@
 // Package lagcomp 是延迟补偿：固定容量的快照历史、按 RTT 回滚取快照、判定射击是否命中。
-// 缺陷：回滚时长写死、不裁剪上限、越界时拿最旧一帧顶替、历史无界增长、取快照线性扫。
 package lagcomp
 
 import (
@@ -19,9 +18,6 @@ const Capacity = 512
 // HitRadius 是命中半径，米。
 const HitRadius = 8.0
 
-// fixedRewindMs 是写死的回滚时长。
-const fixedRewindMs int64 = 100
-
 // ErrTooOld 表示要回滚到的时刻已经不在历史里。
 var ErrTooOld = errors.New("lagcomp: 该时刻的快照已经不在历史里")
 
@@ -38,9 +34,11 @@ type Snapshot struct {
 
 // History 是服务器快照历史。
 type History struct {
-	shooter   Vec
-	snapshots []Snapshot
-	scanned   int
+	shooter Vec
+	ring    [Capacity]Snapshot
+	head    int
+	size    int
+	scanned int
 }
 
 // NewHistory 建一份历史，shooter 是射手所在位置。
@@ -49,41 +47,72 @@ func NewHistory(shooter Vec) *History {
 }
 
 // Record 记一份快照，按时间升序追加。
-// 缺陷：只追加，既不按 RetainMs 裁也不看 Capacity，内存随对局时长无界增长。
 func (h *History) Record(atMs int64, positions map[string]Vec) {
 	copied := make(map[string]Vec, len(positions))
 	for name, position := range positions {
 		copied[name] = position
 	}
-	h.snapshots = append(h.snapshots, Snapshot{AtMs: atMs, Positions: copied})
+	if h.size == Capacity {
+		h.head = (h.head + 1) % Capacity
+	} else {
+		h.size++
+	}
+	h.ring[(h.head+h.size-1)%Capacity] = Snapshot{AtMs: atMs, Positions: copied}
+	// 只保留最近 RetainMs 内的快照（以最新一份为基准）。
+	oldestAt := atMs - RetainMs
+	for h.size > 0 && h.ring[h.head].AtMs < oldestAt {
+		h.head = (h.head + 1) % Capacity
+		h.size--
+	}
 }
 
 // Retained 是当前保留的快照数。
-func (h *History) Retained() int { return len(h.snapshots) }
+func (h *History) Retained() int { return h.size }
 
 // Scanned 是取快照累计看过的记录数（规模观测）。
 func (h *History) Scanned() int { return h.scanned }
 
 // RewindMs 是这次射击要回滚的时长。
-// 缺陷：写死成 fixedRewindMs，与 RTT 无关，也没有上限裁剪。
+// 等于 RTT 的一半（整数除法），并裁剪到 [0, MaxRewindMs]。
 func (h *History) RewindMs(rttMs int64) int64 {
-	return fixedRewindMs
+	rewind := rttMs / 2
+	if rewind < 0 {
+		rewind = 0
+	}
+	if rewind > MaxRewindMs {
+		return MaxRewindMs
+	}
+	return rewind
 }
 
 // SnapshotAt 取 whenMs 时刻（含之前最近一份）的快照。
-// 缺陷：历史不够旧时返回最旧一帧而不是 ErrTooOld，且每次从头线性扫。
+// 取 AtMs <= whenMs 的最新一份；whenMs 早于最旧快照时返回 ErrTooOld。
+// 按时间二分，不许线性扫。
 func (h *History) SnapshotAt(whenMs int64) (Snapshot, error) {
-	if len(h.snapshots) == 0 {
+	if h.size == 0 {
 		return Snapshot{}, nil
 	}
-	found := h.snapshots[0]
-	for _, snapshot := range h.snapshots {
+	// 越界：目标早于最旧快照。先挡掉这条路，二分只需在其余记录间定位。
+	if h.ring[h.head].AtMs > whenMs {
+		return Snapshot{}, ErrTooOld
+	}
+	// 下界二分：找第一个 AtMs > whenMs 的下标，其前一份即为所求。
+	lo, hi := 1, h.size
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
 		h.scanned++
-		if snapshot.AtMs <= whenMs {
-			found = snapshot
+		if h.at(mid).AtMs <= whenMs {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
 	}
-	return found, nil
+	return h.at(lo - 1), nil
+}
+
+// at 取按时间升序的第 index 份快照（环形下标换算）。
+func (h *History) at(index int) Snapshot {
+	return h.ring[(h.head+index)%Capacity]
 }
 
 // Hit 判定 target 在客户端开火那一刻是否被击中。
