@@ -13,6 +13,9 @@ func TestSnapshotAtExactMoment(t *testing.T) {
 	if snapshot.AtMs != 100 || snapshot.Positions["runner"].X != 20 {
 		t.Fatalf("取到的快照不对：%+v", snapshot)
 	}
+	if history.Retained() != 2 {
+		t.Fatalf("短历史不该被裁：%d", history.Retained())
+	}
 }
 
 func TestHitWithTwoHundredMillisecondRTT(t *testing.T) {
@@ -26,12 +29,12 @@ func TestHitWithTwoHundredMillisecondRTT(t *testing.T) {
 		t.Fatalf("判定不该报错：%v", err)
 	}
 	if !hit {
-		t.Fatal("1000ms 开火应该打中 900ms 时距离 2 米的目标")
+		t.Fatal("1000ms 开火应该打中 900ms 时距离 4.5 米的目标")
 	}
 }
 
 func TestConstants(t *testing.T) {
-	if MaxRewindMs != 500 || HitRadius != 8 {
-		t.Fatal("常量被改了")
+	if MaxRewindMs != 500 || RetainMs != 2000 || Capacity != 512 || HitRadius != 8 {
+		t.Fatal("延迟补偿常量被改了")
 	}
 }

@@ -31,7 +31,7 @@ func feed(history *lagcomp.History, fromMs, untilMs, stepMs int64) {
 func Run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("lag-compensation", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	sample := flags.String("sample", "rtt", "rtt / clamp / stale")
+	sample := flags.String("sample", "rtt", "rtt / clamp / stale / growth / scan")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -45,11 +45,23 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		feed(history, 0, 1000, 50)
 		rttMs, clientMs = 4000, 1000
 	case "stale":
-		// 历史只从 600ms 开始，客户端却要回滚到更早的位置。
+		// 历史只从 600ms 开始，按口径却要回滚到更早的位置。
 		feed(history, 600, 1000, 50)
 		rttMs, clientMs = 2000, 1000
+	case "growth":
+		// 一个小时的 50ms 采样。
+		feed(history, 0, 3600000, 50)
+		fmt.Fprintf(stdout, "retained=%d\n", history.Retained())
+		return 0
+	case "scan":
+		feed(history, 0, 100000, 50)
+		for query := 0; query < 5000; query++ {
+			history.SnapshotAt(50000)
+		}
+		fmt.Fprintf(stdout, "retained=%d scanned=%d\n", history.Retained(), history.Scanned())
+		return 0
 	default:
-		fmt.Fprintln(stderr, "需要 --sample rtt|clamp|stale")
+		fmt.Fprintln(stderr, "需要 --sample rtt|clamp|stale|growth|scan")
 		return 2
 	}
 	hit, err := history.Hit("runner", clientMs, rttMs)
